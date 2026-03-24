@@ -1,0 +1,20 @@
+{
+  "players": {
+    "Blossified": {
+      "uuid": "87fbfebcc4834737a0630e0d45b93a3f",
+      "discordUsers": [
+        "989941562089820200"
+      ],
+      "trackedGames": [
+        "BEDWARS"
+      ],
+      "currentGame": null,
+      "startStats": null,
+      "lastGameId": null,
+      "firstPollDone": false
+    }
+  },
+  "threads": {
+    "Blossified": "1486011152139026553"
+  }
+}
