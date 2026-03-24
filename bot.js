@@ -47,13 +47,10 @@ function saveData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// ===== AXIOS INSTANCE =====
-const axiosInstance = axios.create({ timeout: 5000 });
-
 // ===== API =====
 async function getUUID(username) {
     try {
-        const res = await axiosInstance.get("https://api.mojang.com/users/profiles/minecraft/" + username);
+        const res = await axios.get("https://api.mojang.com/users/profiles/minecraft/" + username);
         return res.data.id;
     } catch {
         return null;
@@ -61,32 +58,27 @@ async function getUUID(username) {
 }
 
 async function getRecentGames(uuid) {
-    const res = await axiosInstance.get("https://api.hypixel.net/recentgames?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
+    const res = await axios.get("https://api.hypixel.net/recentgames?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
     return res.data.games || [];
 }
 
-const statsCache = new Map();
 async function getStats(uuid) {
-    const cached = statsCache.get(uuid);
-    if (cached && Date.now() - cached.time < 10000) {
-        return cached.data;
-    }
-    const res = await axiosInstance.get("https://api.hypixel.net/player?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
-    const stats = res.data.player?.stats?.Bedwars || {};
-    statsCache.set(uuid, { data: stats, time: Date.now() });
-    return stats;
+    const res = await axios.get("https://api.hypixel.net/player?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
+    return res.data.player?.stats?.Bedwars || {};
 }
 
-// Optional nick check (can remove to reduce API calls)
+// Returns true if player is nicked (online but showing as offline in /status).
+// Retries once after the retry-after window on a 429.
+// Defaults to false (not nicked) on any unrecoverable error to avoid false positives.
 async function isPlayerNicked(uuid) {
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
-            const res = await axiosInstance.get("https://api.hypixel.net/status?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
+            const res = await axios.get("https://api.hypixel.net/status?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
             const online = res.data?.session?.online ?? true;
             return !online;
         } catch (err) {
             if (err?.response?.status === 429 && attempt === 0) {
-                const wait = parseInt(err.response.headers["retry-after"] || "10") * 1000;
+                const wait = parseInt(err.response.headers["retry-after"] || "10000");
                 await sleep(wait);
                 continue;
             }
@@ -127,10 +119,11 @@ function sleep(ms) {
 }
 
 // ===== POLL INTERVALS =====
-const POLL_INTERVAL_ACTIVE = 20000;  // 20s while in game
-const POLL_INTERVAL_IDLE   = 30000;  // 30s while idle
-const STAGGER_STEP         = 5000;   // stagger poll start
-const NICK_CHECK_DELAY     = 15000;  // delay for nick check
+const POLL_INTERVAL_ACTIVE = 12000;  // 12s while in game
+const POLL_INTERVAL_IDLE   = 20000;  // 20s while idle
+const STAGGER_STEP         = 3000;
+// Wait before checking /status after game start — Hypixel's status API can lag
+const NICK_CHECK_DELAY     = 15000;
 
 // ===== THREADS =====
 async function getOrCreateThread(username) {
@@ -223,26 +216,19 @@ function listPlayers(userId) {
 
 // ===== PER-PLAYER POLLING =====
 const playerTimers = {};
-const playerLocks = {}; // prevent overlapping polls
 
 async function pollPlayer(username) {
-    if (playerLocks[username]) return;
-    playerLocks[username] = true;
-
     const player = data.players[username];
-    if (!player) {
-        playerLocks[username] = false;
-        return;
-    }
+    if (!player) return;
 
     try {
-        // GAME IN PROGRESS
+        // GAME IN PROGRESS — stats only, fires instantly on elimination or win
         if (player.currentGame && player.startStats) {
             const cur  = await getStats(player.uuid);
             const prev = player.startStats;
 
             const gotEliminated = (cur.final_deaths_bedwars || 0) > (prev.final_deaths_bedwars || 0);
-            const gotWin        = (cur.wins_bedwars || 0) > (prev.wins_bedwars || 0);
+            const gotWin        = (cur.wins_bedwars || 0)          > (prev.wins_bedwars || 0);
 
             if (gotEliminated || gotWin) {
                 const thread = await getOrCreateThread(username);
@@ -275,30 +261,29 @@ async function pollPlayer(username) {
                 saveData();
 
                 playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_IDLE);
-                playerLocks[username] = false;
                 return;
             }
 
             playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_ACTIVE);
-            playerLocks[username] = false;
             return;
         }
 
-        // NO GAME — check recentGames for new game
+        // NO GAME — check recentGames for a new game starting
         const recentGames = await getRecentGames(player.uuid);
         const latestGame  = recentGames.find(g =>
             player.trackedGames.includes((g.gameType || "").toUpperCase())
         );
 
+        // FIRST POLL — snapshot only, never notify
         if (!player.firstPollDone) {
             player.lastGameId    = latestGame ? latestGame.date : null;
             player.firstPollDone = true;
             saveData();
             playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_IDLE);
-            playerLocks[username] = false;
             return;
         }
 
+        // GAME START
         if (latestGame && latestGame.date !== player.lastGameId) {
             const thread = await getOrCreateThread(username);
             const { label: modeLabel } = getModeInfo(latestGame.mode);
@@ -313,11 +298,14 @@ async function pollPlayer(username) {
             player.lastGameId = latestGame.date;
             saveData();
 
+            // Send game start message immediately, then check nick status after a delay
+            // and edit the message if they're nicked — avoids holding up the notification.
             const startMsg = await thread.send(
                 ":video_game: **" + username + "** started a **" + modeLabel + "** game\n" +
                 "Map: **" + latestGame.map + "**"
             );
 
+            // Nick check happens in the background — does not block the poll loop
             sleep(NICK_CHECK_DELAY).then(async () => {
                 if (!data.players[username]) return;
                 const nicked = await isPlayerNicked(player.uuid);
@@ -333,14 +321,13 @@ async function pollPlayer(username) {
             });
 
             playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_ACTIVE);
-            playerLocks[username] = false;
             return;
         }
 
     } catch (err) {
         const isRateLimit = err?.response?.status === 429;
         const retryAfter  = isRateLimit
-            ? parseInt(err.response.headers["retry-after"] || "10") * 1000
+            ? parseInt(err.response.headers["retry-after"] || "10000")
             : POLL_INTERVAL_IDLE;
 
         if (isRateLimit) {
@@ -350,9 +337,10 @@ async function pollPlayer(username) {
         }
 
         playerTimers[username] = setTimeout(() => pollPlayer(username), retryAfter);
+        return;
     }
 
-    playerLocks[username] = false;
+    playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_IDLE);
 }
 
 function startPollingPlayer(username, delay) {
@@ -360,9 +348,7 @@ function startPollingPlayer(username, delay) {
     playerTimers[username] = setTimeout(() => pollPlayer(username), delay);
 }
 
-// ===== DISCORD BOT =====
-let botReady = false;
-
+// ===== DISCORD =====
 client.once("clientReady", async () => {
     console.log("Logged in as " + client.user.tag);
     loadData();
@@ -401,15 +387,22 @@ client.once("clientReady", async () => {
     }, 5000);
 });
 
+// ===== THREAD SYNC =====
+let botReady = false;
+
 client.on("threadDelete", thread => {
     if (!botReady) return;
+
     const username = Object.keys(data.threads).find(u => data.threads[u] === thread.id);
     if (!username) return;
+
     console.log("[sync] Thread for " + username + " deleted - removing all trackers");
+
     if (playerTimers[username]) {
         clearTimeout(playerTimers[username]);
         delete playerTimers[username];
     }
+
     delete data.threads[username];
     delete data.players[username];
     saveData();
@@ -418,8 +411,10 @@ client.on("threadDelete", thread => {
 client.on("threadMembersUpdate", (addedMembers, removedMembers, thread) => {
     if (!botReady) return;
     if (removedMembers.size === 0) return;
+
     const username = Object.keys(data.threads).find(u => data.threads[u] === thread.id);
     if (!username) return;
+
     for (const [userId] of removedMembers) {
         if (userId === client.user.id) continue;
         if (data.players[username]?.discordUsers.includes(userId)) {
@@ -429,7 +424,9 @@ client.on("threadMembersUpdate", (addedMembers, removedMembers, thread) => {
     }
 });
 
+// ===== INTERACTIONS =====
 client.on("interactionCreate", async interaction => {
+
     if (interaction.isButton()) {
         const userId = interaction.user.id;
 
