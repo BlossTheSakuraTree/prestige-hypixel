@@ -27,8 +27,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-// ===== DATA =====
-const DATA_FILE = "./data.json";
+const DATA_FILE = process.env.DATA_PATH || "/data/data.json";
 let data = { players: {}, threads: {} };
 
 function loadData() {
@@ -47,7 +46,6 @@ function saveData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// ===== API =====
 async function getUUID(username) {
     try {
         const res = await axios.get("https://api.mojang.com/users/profiles/minecraft/" + username);
@@ -67,9 +65,6 @@ async function getStats(uuid) {
     return res.data.player?.stats?.Bedwars || {};
 }
 
-// Returns true if player is nicked (online but showing as offline in /status).
-// Retries once after the retry-after window on a 429.
-// Defaults to false (not nicked) on any unrecoverable error to avoid false positives.
 async function isPlayerNicked(uuid) {
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
@@ -89,7 +84,6 @@ async function isPlayerNicked(uuid) {
     return false;
 }
 
-// ===== HELPERS =====
 const MODE_INFO = {
     EIGHT_ONE:  { label: "Solos",   streakKey: "eight_one_winstreak"  },
     EIGHT_TWO:  { label: "Doubles", streakKey: "eight_two_winstreak"  },
@@ -118,14 +112,11 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ===== POLL INTERVALS =====
-const POLL_INTERVAL_ACTIVE = 12000;  // 12s while in game
-const POLL_INTERVAL_IDLE   = 20000;  // 20s while idle
+const POLL_INTERVAL_ACTIVE = 12000;
+const POLL_INTERVAL_IDLE   = 20000;
 const STAGGER_STEP         = 3000;
-// Wait before checking /status after game start — Hypixel's status API can lag
 const NICK_CHECK_DELAY     = 15000;
 
-// ===== THREADS =====
 async function getOrCreateThread(username) {
     if (data.threads[username]) {
         try {
@@ -163,7 +154,6 @@ async function deleteThreadForPlayer(username) {
     saveData();
 }
 
-// ===== PLAYER MANAGEMENT =====
 async function addPlayer(username, userId) {
     const uuid = await getUUID(username);
     if (!uuid) return false;
@@ -213,8 +203,6 @@ function listPlayers(userId) {
         data.players[p].discordUsers.includes(userId)
     );
 }
-
-// ===== PER-PLAYER POLLING =====
 const playerTimers = {};
 
 async function pollPlayer(username) {
@@ -222,7 +210,6 @@ async function pollPlayer(username) {
     if (!player) return;
 
     try {
-        // GAME IN PROGRESS — stats only, fires instantly on elimination or win
         if (player.currentGame && player.startStats) {
             const cur  = await getStats(player.uuid);
             const prev = player.startStats;
@@ -268,13 +255,11 @@ async function pollPlayer(username) {
             return;
         }
 
-        // NO GAME — check recentGames for a new game starting
         const recentGames = await getRecentGames(player.uuid);
         const latestGame  = recentGames.find(g =>
             player.trackedGames.includes((g.gameType || "").toUpperCase())
         );
 
-        // FIRST POLL — snapshot only, never notify
         if (!player.firstPollDone) {
             player.lastGameId    = latestGame ? latestGame.date : null;
             player.firstPollDone = true;
@@ -283,7 +268,6 @@ async function pollPlayer(username) {
             return;
         }
 
-        // GAME START
         if (latestGame && latestGame.date !== player.lastGameId) {
             const thread = await getOrCreateThread(username);
             const { label: modeLabel } = getModeInfo(latestGame.mode);
@@ -298,14 +282,11 @@ async function pollPlayer(username) {
             player.lastGameId = latestGame.date;
             saveData();
 
-            // Send game start message immediately, then check nick status after a delay
-            // and edit the message if they're nicked — avoids holding up the notification.
             const startMsg = await thread.send(
                 ":video_game: **" + username + "** started a **" + modeLabel + "** game\n" +
                 "Map: **" + latestGame.map + "**"
             );
 
-            // Nick check happens in the background — does not block the poll loop
             sleep(NICK_CHECK_DELAY).then(async () => {
                 if (!data.players[username]) return;
                 const nicked = await isPlayerNicked(player.uuid);
@@ -348,7 +329,6 @@ function startPollingPlayer(username, delay) {
     playerTimers[username] = setTimeout(() => pollPlayer(username), delay);
 }
 
-// ===== DISCORD =====
 client.once("clientReady", async () => {
     console.log("Logged in as " + client.user.tag);
     loadData();
@@ -387,7 +367,6 @@ client.once("clientReady", async () => {
     }, 5000);
 });
 
-// ===== THREAD SYNC =====
 let botReady = false;
 
 client.on("threadDelete", thread => {
@@ -424,7 +403,6 @@ client.on("threadMembersUpdate", (addedMembers, removedMembers, thread) => {
     }
 });
 
-// ===== INTERACTIONS =====
 client.on("interactionCreate", async interaction => {
 
     if (interaction.isButton()) {
