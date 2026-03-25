@@ -46,10 +46,11 @@ function saveData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
+// Returns { uuid, canonicalName } or null
 async function getUUID(username) {
     try {
         const res = await axios.get("https://api.mojang.com/users/profiles/minecraft/" + username);
-        return res.data.id;
+        return { uuid: res.data.id, canonicalName: res.data.name };
     } catch {
         return null;
     }
@@ -117,6 +118,11 @@ const POLL_INTERVAL_IDLE   = 20000;
 const STAGGER_STEP         = 3000;
 const NICK_CHECK_DELAY     = 15000;
 
+// Finds an existing player entry by UUID (case-insensitive lookup helper)
+function findPlayerKeyByUUID(uuid) {
+    return Object.keys(data.players).find(k => data.players[k].uuid === uuid) || null;
+}
+
 async function getOrCreateThread(username) {
     if (data.threads[username]) {
         try {
@@ -154,53 +160,71 @@ async function deleteThreadForPlayer(username) {
     saveData();
 }
 
-async function addPlayer(username, userId) {
-    const key = username.toLowerCase();
-    const uuid = await getUUID(username);
-    if (!uuid) return false;
+async function addPlayer(inputUsername, userId) {
+    const result = await getUUID(inputUsername);
+    if (!result) return { success: false, canonicalName: null };
 
-    if (!data.players[key]) {
-        data.players[key] = {
-            uuid,
-            usernameOriginal: username,
-            discordUsers: [userId],
-            trackedGames: ["BEDWARS"],
-            currentGame: null,
-            startStats: null,
-            lastGameId: null,
-            firstPollDone: false
-        };
-        startPollingPlayer(key, 0);
-    } else {
-        if (!data.players[key].discordUsers.includes(userId)) {
-            data.players[key].discordUsers.push(userId);
+    const { uuid, canonicalName } = result;
+
+    // Check if this player is already tracked (matched by UUID, regardless of input casing)
+    const existingKey = findPlayerKeyByUUID(uuid);
+
+    if (existingKey) {
+        // Player already exists - just add the user to the tracker and the thread
+        if (!data.players[existingKey].discordUsers.includes(userId)) {
+            data.players[existingKey].discordUsers.push(userId);
+
+            // Add user to the existing thread if it exists
+            if (data.threads[existingKey]) {
+                try {
+                    const thread = await client.channels.fetch(data.threads[existingKey]);
+                    await thread.members.add(userId);
+                } catch {}
+            }
         }
+        saveData();
+        return { success: true, canonicalName: existingKey };
     }
-    
-    if (data.threads[key]) {
-        try {
-            const thread = await client.channels.fetch(data.threads[key]);
-            await thread.members.add(userId);
-        } catch {}
-    }
+
+    // Brand-new player - store under the canonical Mojang username
+    data.players[canonicalName] = {
+        uuid,
+        discordUsers: [userId],
+        trackedGames: ["BEDWARS"],
+        currentGame:   null,
+        startStats:    null,
+        lastGameId:    null,
+        firstPollDone: false
+    };
+    startPollingPlayer(canonicalName, 0);
 
     saveData();
-    return true;
+    return { success: true, canonicalName };
 }
 
-async function removePlayer(username, userId) {
-    if (!data.players[username]) return false;
+async function removePlayer(inputUsername, userId) {
+    // Resolve to canonical key: exact match first, then UUID lookup via Mojang
+    let key = data.players[inputUsername] ? inputUsername : null;
 
-    data.players[username].discordUsers =
-        data.players[username].discordUsers.filter(id => id !== userId);
+    if (!key) {
+        // Try a case-insensitive match against stored keys
+        key = Object.keys(data.players).find(
+            k => k.toLowerCase() === inputUsername.toLowerCase()
+        ) || null;
+    }
 
-    if (data.players[username].discordUsers.length === 0) {
-        if (playerTimers[username]) {
-            clearTimeout(playerTimers[username]);
-            delete playerTimers[username];
+    if (!key) return false;
+
+    data.players[key].discordUsers =
+        data.players[key].discordUsers.filter(id => id !== userId);
+
+    if (data.players[key].discordUsers.length === 0) {
+        if (playerTimers[key]) {
+            clearTimeout(playerTimers[key]);
+            delete playerTimers[key];
         }
-        await deleteThreadForPlayer(username);
-        delete data.players[username];
+        await deleteThreadForPlayer(key);
+        delete data.players[key];
     }
 
     saveData();
@@ -212,6 +236,7 @@ function listPlayers(userId) {
         data.players[p].discordUsers.includes(userId)
     );
 }
+
 const playerTimers = {};
 
 async function pollPlayer(username) {
@@ -438,25 +463,25 @@ client.on("interactionCreate", async interaction => {
     const userId = interaction.user.id;
 
     if (interaction.commandName === "addplayer") {
-        const username = interaction.options.getString("username");
+        const inputUsername = interaction.options.getString("username");
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const success = await addPlayer(username, userId);
-        if (!success) return interaction.editReply("Could not find player **" + username + "**");
+        const { success, canonicalName } = await addPlayer(inputUsername, userId);
+        if (!success) return interaction.editReply("Could not find player **" + inputUsername + "**");
 
-        await getOrCreateThread(username);
-        return interaction.editReply("Now tracking **" + username + "**");
+        await getOrCreateThread(canonicalName);
+        return interaction.editReply("Now tracking **" + canonicalName + "**");
     }
 
     if (interaction.commandName === "removeplayer") {
-        const username = interaction.options.getString("username");
+        const inputUsername = interaction.options.getString("username");
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const success = await removePlayer(username, userId);
+        const success = await removePlayer(inputUsername, userId);
         return interaction.editReply(
             success
-                ? "Stopped tracking **" + username + "**"
-                : "You are not tracking **" + username + "**"
+                ? "Stopped tracking **" + inputUsername + "**"
+                : "You are not tracking **" + inputUsername + "**"
         );
     }
 
