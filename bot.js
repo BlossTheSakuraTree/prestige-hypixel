@@ -168,9 +168,9 @@ async function addPlayer(username, userId) {
             usernameOriginal: username,
             discordUsers: [userId],
             trackedGames: ["BEDWARS"],
-            currentGame:   null,
-            startStats:    null,
-            lastGameId:    null,
+            currentGame: null,
+            startStats: null,
+            lastGameId: null,
             firstPollDone: false
         };
         startPollingPlayer(key, 0);
@@ -178,6 +178,13 @@ async function addPlayer(username, userId) {
         if (!data.players[key].discordUsers.includes(userId)) {
             data.players[key].discordUsers.push(userId);
         }
+    }
+
+    if (data.threads[key]) {
+        try {
+            const thread = await client.channels.fetch(data.threads[key]);
+            await thread.members.add(userId);
+        } catch {}
     }
 
     saveData();
