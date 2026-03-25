@@ -118,42 +118,39 @@ const STAGGER_STEP         = 3000;
 const NICK_CHECK_DELAY     = 15000;
 
 async function getOrCreateThread(username) {
-    const key = username.toLowerCase();
-
-    if (data.threads[key]) {
+    if (data.threads[username]) {
         try {
-            return await client.channels.fetch(data.threads[key]);
+            return await client.channels.fetch(data.threads[username]);
         } catch {
-            delete data.threads[key];
+            delete data.threads[username];
             saveData();
         }
     }
 
     const channel = await client.channels.fetch(NOTIFICATION_CHANNEL);
     const thread = await channel.threads.create({
-        name: "Notifications-" + (data.players[key]?.usernameOriginal || username),
+        name: "Notifications-" + username,
         type: ChannelType.PrivateThread,
         invitable: false,
         autoArchiveDuration: 60
     });
 
-    for (const userId of data.players[key]?.discordUsers || []) {
+    for (const userId of data.players[username]?.discordUsers || []) {
         try { await thread.members.add(userId); } catch {}
     }
 
-    data.threads[key] = thread.id;
+    data.threads[username] = thread.id;
     saveData();
     return thread;
 }
 
 async function deleteThreadForPlayer(username) {
-    const key = username.toLowerCase();
-    if (!data.threads[key]) return;
+    if (!data.threads[username]) return;
     try {
-        const thread = await client.channels.fetch(data.threads[key]);
+        const thread = await client.channels.fetch(data.threads[username]);
         await thread.delete();
     } catch {}
-    delete data.threads[key];
+    delete data.threads[username];
     saveData();
 }
 
@@ -179,7 +176,7 @@ async function addPlayer(username, userId) {
             data.players[key].discordUsers.push(userId);
         }
     }
-
+    
     if (data.threads[key]) {
         try {
             const thread = await client.channels.fetch(data.threads[key]);
@@ -192,19 +189,18 @@ async function addPlayer(username, userId) {
 }
 
 async function removePlayer(username, userId) {
-    const key = username.toLowerCase();
-    if (!data.players[key]) return false;
+    if (!data.players[username]) return false;
 
-    data.players[key].discordUsers =
-        data.players[key].discordUsers.filter(id => id !== userId);
+    data.players[username].discordUsers =
+        data.players[username].discordUsers.filter(id => id !== userId);
 
-    if (data.players[key].discordUsers.length === 0) {
-        if (playerTimers[key]) {
-            clearTimeout(playerTimers[key]);
-            delete playerTimers[key];
+    if (data.players[username].discordUsers.length === 0) {
+        if (playerTimers[username]) {
+            clearTimeout(playerTimers[username]);
+            delete playerTimers[username];
         }
-        await deleteThreadForPlayer(key);
-        delete data.players[key];
+        await deleteThreadForPlayer(username);
+        delete data.players[username];
     }
 
     saveData();
@@ -212,11 +208,10 @@ async function removePlayer(username, userId) {
 }
 
 function listPlayers(userId) {
-    return Object.keys(data.players)
-        .filter(k => data.players[k].discordUsers.includes(userId))
-        .map(k => data.players[k].usernameOriginal);
+    return Object.keys(data.players).filter(p =>
+        data.players[p].discordUsers.includes(userId)
+    );
 }
-
 const playerTimers = {};
 
 async function pollPlayer(username) {
@@ -232,7 +227,7 @@ async function pollPlayer(username) {
             const gotWin        = (cur.wins_bedwars || 0)          > (prev.wins_bedwars || 0);
 
             if (gotEliminated || gotWin) {
-                const thread = await getOrCreateThread(player.usernameOriginal);
+                const thread = await getOrCreateThread(username);
                 const { label: modeLabel, streakKey } = getModeInfo(player.currentGame.mode);
 
                 const fkdrBefore = fkdr(prev);
@@ -251,7 +246,7 @@ async function pollPlayer(username) {
                 const outcome = gotWin ? "won" : "was eliminated from";
 
                 await thread.send(
-                    (gotWin ? ":trophy:" : ":skull:") + " **" + player.usernameOriginal + "** " + outcome + " a **" + modeLabel + "** game\n" +
+                    (gotWin ? ":trophy:" : ":skull:") + " **" + username + "** " + outcome + " a **" + modeLabel + "** game\n" +
                     "FKDR: " + signed(fkdrAfter - fkdrBefore) + " (now " + fkdrAfter.toFixed(3) + ")\n" +
                     "WLR: " + signed(wlrAfter - wlrBefore) + " (now " + wlrAfter.toFixed(3) + ")\n" +
                     streakLine
@@ -283,7 +278,7 @@ async function pollPlayer(username) {
         }
 
         if (latestGame && latestGame.date !== player.lastGameId) {
-            const thread = await getOrCreateThread(player.usernameOriginal);
+            const thread = await getOrCreateThread(username);
             const { label: modeLabel } = getModeInfo(latestGame.mode);
 
             player.currentGame = {
@@ -297,7 +292,7 @@ async function pollPlayer(username) {
             saveData();
 
             const startMsg = await thread.send(
-                ":video_game: **" + player.usernameOriginal + "** started a **" + modeLabel + "** game\n" +
+                ":video_game: **" + username + "** started a **" + modeLabel + "** game\n" +
                 "Map: **" + latestGame.map + "**"
             );
 
@@ -307,7 +302,7 @@ async function pollPlayer(username) {
                 if (nicked) {
                     try {
                         await startMsg.edit(
-                            ":video_game: **" + player.usernameOriginal + "** started a **" + modeLabel + "** game\n" +
+                            ":video_game: **" + username + "** started a **" + modeLabel + "** game\n" +
                             "Map: **" + latestGame.map + "**\n" +
                             ":disguised_face: Player appears to be **nicked**"
                         );
