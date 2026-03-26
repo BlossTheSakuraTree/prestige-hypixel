@@ -80,12 +80,40 @@ async function hasRecentGamesEnabled(uuid) {
     }
 }
 
-async function isPlayerNicked(uuid) {
+// Returns true if the player appears to be nicked.
+// When nicked, Hypixel hides the real UUID from the status API entirely (online: false).
+// expectedGameType: the gameType we just detected them entering (e.g. "BEDWARS") -
+// used as positive confirmation that they're NOT nicked if their UUID is visible in that game.
+async function isPlayerNicked(uuid, expectedGameType) {
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
             const res = await axios.get("https://api.hypixel.net/status?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
-            const online = res.data?.session?.online ?? true;
-            return !online;
+
+            if (!res.data?.success) {
+                console.warn("[nick check] API returned success:false, assuming not nicked");
+                return false;
+            }
+
+            const session = res.data.session;
+
+            // Real UUID not showing as online at all - since we know they just entered a game,
+            // this means their real UUID is hidden by Hypixel because they nicked.
+            if (!session?.online) {
+                console.log("[nick check] " + uuid + " shows offline while in-game - likely nicked");
+                return true;
+            }
+
+            // Positive confirmation: visible and in the right game type -> definitely not nicked
+            if (expectedGameType && session.gameType === expectedGameType) {
+                console.log("[nick check] " + uuid + " visible in " + session.gameType + " - not nicked");
+                return false;
+            }
+
+            // Online but in an unexpected game type (e.g. LOBBY, LIMBO, or different game).
+            // Their real UUID is visible, so they are not nicked.
+            console.log("[nick check] " + uuid + " online in " + (session.gameType || "unknown") + ", expected " + expectedGameType + " - not nicked");
+            return false;
+
         } catch (err) {
             if (err?.response?.status === 429 && attempt === 0) {
                 const wait = parseInt(err.response.headers["retry-after"] || "10000");
@@ -337,9 +365,12 @@ async function pollPlayer(username) {
                 "Map: **" + latestGame.map + "**"
             );
 
+            const capturedGameId = latestGame.date;
             sleep(NICK_CHECK_DELAY).then(async () => {
                 if (!data.players[username]) return;
-                const nicked = await isPlayerNicked(player.uuid);
+                // Skip if the game already ended before the 15s check fires
+                if (data.players[username].currentGame?.id !== capturedGameId) return;
+                const nicked = await isPlayerNicked(player.uuid, latestGame.gameType);
                 if (nicked) {
                     try {
                         await startMsg.edit(
