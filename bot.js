@@ -66,6 +66,20 @@ async function getStats(uuid) {
     return res.data.player?.stats?.Bedwars || {};
 }
 
+// Returns true if recent games API appears to be enabled (or player has no stats yet)
+async function hasRecentGamesEnabled(uuid) {
+    try {
+        const [games, stats] = await Promise.all([getRecentGames(uuid), getStats(uuid)]);
+        const hasPlayedBefore = (stats.games_played_bedwars || 0) > 0;
+        // If they've played Bedwars but recent games is empty, API is almost certainly off
+        if (hasPlayedBefore && games.length === 0) return false;
+        return true;
+    } catch {
+        // If we can't tell, don't block the add - just don't warn
+        return true;
+    }
+}
+
 async function isPlayerNicked(uuid) {
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
@@ -183,10 +197,12 @@ async function addPlayer(inputUsername, userId) {
             }
         }
         saveData();
-        return { success: true, canonicalName: existingKey };
+        return { success: true, canonicalName: existingKey, recentGamesEnabled: true };
     }
 
     // Brand-new player - store under the canonical Mojang username
+    const recentGamesEnabled = await hasRecentGamesEnabled(uuid);
+
     data.players[canonicalName] = {
         uuid,
         discordUsers: [userId],
@@ -199,7 +215,7 @@ async function addPlayer(inputUsername, userId) {
     startPollingPlayer(canonicalName, 0);
 
     saveData();
-    return { success: true, canonicalName };
+    return { success: true, canonicalName, recentGamesEnabled };
 }
 
 async function removePlayer(inputUsername, userId) {
@@ -466,11 +482,16 @@ client.on("interactionCreate", async interaction => {
         const inputUsername = interaction.options.getString("username");
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const { success, canonicalName } = await addPlayer(inputUsername, userId);
+        const { success, canonicalName, recentGamesEnabled } = await addPlayer(inputUsername, userId);
         if (!success) return interaction.editReply("Could not find player **" + inputUsername + "**");
 
         await getOrCreateThread(canonicalName);
-        return interaction.editReply("Now tracking **" + canonicalName + "**");
+
+        const warning = recentGamesEnabled
+            ? ""
+            : "\n\n⚠️ **Warning:** **" + canonicalName + "** has their Recent Games API disabled on Hypixel. The bot won't be able to detect when they start a game until they turn it back on (`/api` in-game).";
+
+        return interaction.editReply("Now tracking **" + canonicalName + "**" + warning);
     }
 
     if (interaction.commandName === "removeplayer") {
