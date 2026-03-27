@@ -27,7 +27,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-const DATA_FILE = process.env.DATA_PATH || "/data/data.json";
+const DATA_FILE = process.env.DATA_PATH || require("path").join(__dirname, "/data/data.json");
 let data = { players: {}, threads: {} };
 
 function loadData() {
@@ -212,20 +212,23 @@ async function addPlayer(inputUsername, userId) {
     const existingKey = findPlayerKeyByUUID(uuid);
 
     if (existingKey) {
-        // Player already exists - just add the user to the tracker and the thread
-        if (!data.players[existingKey].discordUsers.includes(userId)) {
-            data.players[existingKey].discordUsers.push(userId);
-
-            // Add user to the existing thread if it exists
-            if (data.threads[existingKey]) {
-                try {
-                    const thread = await client.channels.fetch(data.threads[existingKey]);
-                    await thread.members.add(userId);
-                } catch {}
-            }
+        // User is already tracking this player
+        if (data.players[existingKey].discordUsers.includes(userId)) {
+            return { success: true, canonicalName: existingKey, recentGamesEnabled: true, alreadyTracking: true };
         }
+
+        // Different user tracking an existing player - add them to the tracker and thread
+        data.players[existingKey].discordUsers.push(userId);
+
+        if (data.threads[existingKey]) {
+            try {
+                const thread = await client.channels.fetch(data.threads[existingKey]);
+                await thread.members.add(userId);
+            } catch {}
+        }
+
         saveData();
-        return { success: true, canonicalName: existingKey, recentGamesEnabled: true };
+        return { success: true, canonicalName: existingKey, recentGamesEnabled: true, alreadyTracking: false };
     }
 
     // Brand-new player - store under the canonical Mojang username
@@ -442,6 +445,14 @@ client.once("clientReady", async () => {
     const rest = new REST({ version: "10" }).setToken(TOKEN);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
 
+    // Cache the notification channel name once so we don't fetch it on every interaction
+    try {
+        const notifChannel = await client.channels.fetch(NOTIFICATION_CHANNEL);
+        notificationChannelName = notifChannel.name;
+    } catch {
+        console.warn("Could not fetch notification channel name");
+    }
+
     setTimeout(() => {
         botReady = true;
         console.log("Bot ready - thread sync active");
@@ -449,6 +460,7 @@ client.once("clientReady", async () => {
 });
 
 let botReady = false;
+let notificationChannelName = null;
 
 client.on("threadDelete", thread => {
     if (!botReady) return;
@@ -486,6 +498,20 @@ client.on("threadMembersUpdate", (addedMembers, removedMembers, thread) => {
 
 client.on("interactionCreate", async interaction => {
 
+    // Restrict commands to the notification channel only.
+    // Also allow interactions that originate inside one of the private threads
+    // (e.g. button confirmations sent while the user is viewing a thread).
+    const isInCorrectChannel = interaction.channelId === NOTIFICATION_CHANNEL;
+    const isInChildThread    = interaction.channel?.parentId === NOTIFICATION_CHANNEL;
+
+    if (!isInCorrectChannel && !isInChildThread) {
+        const name = notificationChannelName || NOTIFICATION_CHANNEL;
+        return interaction.reply({
+            content: "You can't use this bot in here! Head to the #" + name + " channel to use the bot.",
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
     if (interaction.isButton()) {
         const userId = interaction.user.id;
 
@@ -513,8 +539,9 @@ client.on("interactionCreate", async interaction => {
         const inputUsername = interaction.options.getString("username");
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const { success, canonicalName, recentGamesEnabled } = await addPlayer(inputUsername, userId);
+        const { success, canonicalName, recentGamesEnabled, alreadyTracking } = await addPlayer(inputUsername, userId);
         if (!success) return interaction.editReply("Could not find player **" + inputUsername + "**");
+        if (alreadyTracking) return interaction.editReply("You are already tracking **" + canonicalName + "**!");
 
         await getOrCreateThread(canonicalName);
 
