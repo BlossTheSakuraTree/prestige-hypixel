@@ -88,20 +88,21 @@ async function validateHypixelKey() {
     }
 }
 
-// Checks both recent games and winstreak API visibility in one call.
+// Checks winstreak API visibility.
+// Hypixel returns an identical empty array for recent games whether the API is off
+// or the player just hasn't played recently - so that check is unreliable and omitted.
 // Winstreak API being off means all *_winstreak fields are absent from the stats object.
 async function checkPlayerApiFlags(uuid) {
     try {
-        const [games, stats] = await Promise.all([getRecentGames(uuid), getStats(uuid)]);
-        const hasPlayedBefore  = (stats.games_played_bedwars || 0) > 0;
-        const recentGamesEnabled = !(hasPlayedBefore && games.length === 0);
-        // If the player has played but no winstreak field exists at all, API is off
-        const winstreakEnabled   = !hasPlayedBefore || stats.winstreak !== undefined ||
-                                   stats.eight_one_winstreak !== undefined ||
-                                   stats.eight_two_winstreak !== undefined ||
-                                   stats.four_three_winstreak !== undefined ||
-                                   stats.four_four_winstreak !== undefined;
-        return { recentGamesEnabled, winstreakEnabled };
+        const stats = await getStats(uuid);
+        const hasPlayedBefore = (stats.games_played_bedwars || 0) > 0;
+        const winstreakEnabled = !hasPlayedBefore ||
+                                 stats.winstreak !== undefined ||
+                                 stats.eight_one_winstreak !== undefined ||
+                                 stats.eight_two_winstreak !== undefined ||
+                                 stats.four_three_winstreak !== undefined ||
+                                 stats.four_four_winstreak !== undefined;
+        return { recentGamesEnabled: true, winstreakEnabled };
     } catch {
         return { recentGamesEnabled: true, winstreakEnabled: true };
     }
@@ -585,8 +586,8 @@ client.on("interactionCreate", async interaction => {
         await getOrCreateThread(canonicalName);
 
         const warnings = [];
-        if (!recentGamesEnabled) warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Recent Games API disabled on Hypixel. The bot won\'t be able to detect when they start a game until they turn it back on (`/api` in-game).");
-        if (!winstreakEnabled)   warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Winstreak API disabled on Hypixel. Winstreak changes will show as **? → ?** until they turn it back on (`/api` in-game).");
+        if (!recentGamesEnabled) warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Recent Games API disabled on Hypixel, or they haven't logged in in a long time. The bot won't be able to detect when they start a game unless they enable it again in their Hypixel API settings.");
+        if (!winstreakEnabled)   warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Winstreak API disabled on Hypixel. Winstreak changes will show as **? → ?** unless they enable it again in their Hypixel API settings.");
 
         const warningText = warnings.length ? "\n\n" + warnings.join("\n\n") : "";
         return interaction.editReply("Now tracking **" + canonicalName + "**" + warningText);
