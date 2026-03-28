@@ -27,7 +27,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-const DATA_FILE = process.env.DATA_PATH || require("path").join(__dirname, "/data/data.json");
+const DATA_FILE = process.env.DATA_PATH || require("path").join(__dirname, "data.json");
 let data = { players: {}, threads: {} };
 
 function loadData() {
@@ -161,9 +161,13 @@ async function checkPlayerApiFlags(uuid) {
     }
 }
 
+// Bypasses the queue intentionally - this check is time-sensitive and must
+// fire close to NICK_CHECK_DELAY ms after the game starts. Going through the
+// queue would delay it by however long the backlog is, making the window
+// unreliable. The status endpoint is cheap and called at most once per game.
 async function isPlayerNicked(uuid, expectedGameType) {
     try {
-        const res = await hypixelRequest("https://api.hypixel.net/status?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
+        const res = await axios.get("https://api.hypixel.net/status?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
 
         if (!res.data?.success) {
             console.warn("[nick check] API returned success:false, assuming not nicked");
