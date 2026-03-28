@@ -50,18 +50,20 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-const MIN_REQUEST_GAP = 300;
-let lastRequestTime = 0;
+const MIN_REQUEST_GAP = 500;
+let lastRequestTime  = 0;
 let rateLimitedUntil = 0;
-let requestQueue = Promise.resolve();
+let requestQueue     = Promise.resolve();
 
 function hypixelRequest(url) {
-    requestQueue = requestQueue.then(async () => {
+    // The result promise (may reject) is returned to the caller.
+    // requestQueue is updated with result.catch(() => {}) so it ALWAYS resolves,
+    // keeping the chain alive for subsequent requests even after a failure.
+    const result = requestQueue.then(async () => {
         const now = Date.now();
-
         if (rateLimitedUntil > now) {
             const wait = rateLimitedUntil - now;
-            console.warn("[queue] Rate limited - waiting " + (wait / 1000).toFixed(1) + "s before next request");
+            console.warn("[queue] Rate limited - waiting " + (wait / 1000).toFixed(1) + "s");
             await sleep(wait);
         }
 
@@ -71,20 +73,21 @@ function hypixelRequest(url) {
         }
 
         lastRequestTime = Date.now();
-    });
 
-    return requestQueue.then(async () => {
         try {
             return await axios.get(url);
         } catch (err) {
             if (err?.response?.status === 429) {
                 const retryAfter = parseInt(err.response.headers?.["retry-after"] || "10000");
                 rateLimitedUntil = Date.now() + retryAfter;
-                console.warn("[queue] 429 received - blocking all requests for " + (retryAfter / 1000).toFixed(1) + "s");
+                console.warn("[queue] 429 - blocking requests for " + (retryAfter / 1000).toFixed(1) + "s");
             }
             throw err;
         }
     });
+
+    requestQueue = result.catch(() => {});
+    return result;
 }
 
 async function getUUID(username) {
@@ -151,7 +154,7 @@ async function checkPlayerApiFlags(uuid) {
 
         return { recentGamesEnabled, winstreakEnabled };
     } catch (err) {
-        console.error("[api flags] Failed to check API flags for " + uuid + ":", err.message);
+        console.error("[api flags] Failed for " + uuid + ":", err.message);
         return { recentGamesEnabled: null, winstreakEnabled: null };
     }
 }
@@ -168,7 +171,7 @@ async function isPlayerNicked(uuid, expectedGameType) {
         const session = res.data.session;
 
         if (!session?.online) {
-            console.log("[nick check] " + uuid + " shows offline while in-game - likely nicked");
+            console.log("[nick check] " + uuid + " offline while in-game - likely nicked");
             return true;
         }
 
@@ -180,7 +183,7 @@ async function isPlayerNicked(uuid, expectedGameType) {
         console.log("[nick check] " + uuid + " online in " + (session.gameType || "unknown") + ", expected " + expectedGameType + " - not nicked");
         return false;
     } catch (err) {
-        console.warn("[nick check] status API failed, assuming not nicked:", err.message);
+        console.warn("[nick check] Failed, assuming not nicked:", err.message);
         return false;
     }
 }
