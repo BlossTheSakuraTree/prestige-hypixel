@@ -56,9 +56,6 @@ let rateLimitedUntil = 0;
 let requestQueue     = Promise.resolve();
 
 function hypixelRequest(url) {
-    // The result promise (may reject) is returned to the caller.
-    // requestQueue is updated with result.catch(() => {}) so it ALWAYS resolves,
-    // keeping the chain alive for subsequent requests even after a failure.
     const result = requestQueue.then(async () => {
         const now = Date.now();
         if (rateLimitedUntil > now) {
@@ -88,6 +85,11 @@ function hypixelRequest(url) {
 
     requestQueue = result.catch(() => {});
     return result;
+}
+
+function idleDelay() {
+    const rateLimitBuffer = Math.max(0, rateLimitedUntil - Date.now());
+    return Math.max(POLL_INTERVAL_IDLE, rateLimitBuffer + POLL_INTERVAL_IDLE);
 }
 
 async function getUUID(username) {
@@ -385,7 +387,7 @@ async function pollPlayer(username) {
                 player.startStats  = null;
                 saveData();
 
-                playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_IDLE);
+                playerTimers[username] = setTimeout(() => pollPlayer(username), idleDelay());
                 return;
             }
 
@@ -425,16 +427,19 @@ async function pollPlayer(username) {
                 "Map: **" + latestGame.map + "**"
             );
 
-            const capturedGameId = latestGame.date;
+            const capturedUuid     = player.uuid;
+            const capturedGameType = latestGame.gameType;
+            const capturedMap      = latestGame.map;
+            const capturedLabel    = modeLabel;
+
             sleep(NICK_CHECK_DELAY).then(async () => {
                 if (!data.players[username]) return;
-                if (data.players[username].currentGame?.id !== capturedGameId) return;
-                const nicked = await isPlayerNicked(player.uuid, latestGame.gameType);
+                const nicked = await isPlayerNicked(capturedUuid, capturedGameType);
                 if (nicked) {
                     try {
                         await startMsg.edit(
-                            ":video_game: **" + username + "** started a **" + modeLabel + "** game\n" +
-                            "Map: **" + latestGame.map + "**\n" +
+                            ":video_game: **" + username + "** started a **" + capturedLabel + "** game\n" +
+                            "Map: **" + capturedMap + "**\n" +
                             ":disguised_face: Player appears to be **nicked**"
                         );
                     } catch {}
@@ -456,7 +461,7 @@ async function pollPlayer(username) {
         console.error("[" + username + "] Poll error:", err.message);
     }
 
-    playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_IDLE);
+    playerTimers[username] = setTimeout(() => pollPlayer(username), idleDelay());
 }
 
 function startPollingPlayer(username, delay) {
