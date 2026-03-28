@@ -27,7 +27,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-const DATA_FILE = process.env.DATA_PATH || require("path").join(__dirname, "data.json");
+const DATA_FILE = process.env.DATA_PATH || require("path").join(__dirname, "/data/data.json");
 let data = { players: {}, threads: {} };
 
 function loadData() {
