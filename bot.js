@@ -85,29 +85,62 @@ async function validateHypixelKey() {
     }
 }
 
-async function checkPlayerApiFlags(uuid) {
-    try {
-        const [games, stats] = await Promise.all([getRecentGames(uuid), getStats(uuid)]);
-        const hasPlayedBefore    = (stats.games_played_bedwars || 0) > 0;
-        const recentGamesEnabled = !(hasPlayedBefore && games.length === 0);
-        const winstreakEnabled   = !hasPlayedBefore ||
-                                   stats.winstreak !== undefined ||
-                                   stats.eight_one_winstreak !== undefined ||
-                                   stats.eight_two_winstreak !== undefined ||
-                                   stats.four_three_winstreak !== undefined ||
-                                   stats.four_four_winstreak !== undefined;
-        console.log("[api flags] uuid=" + uuid +
-            " gamesPlayed=" + (stats.games_played_bedwars || 0) +
-            " recentGamesCount=" + games.length +
-            " recentGamesEnabled=" + recentGamesEnabled +
-            " winstreakEnabled=" + winstreakEnabled +
-            " winstreak=" + stats.winstreak +
-            " eight_one_winstreak=" + stats.eight_one_winstreak);
-        return { recentGamesEnabled, winstreakEnabled };
-    } catch (err) {
-        console.error("[api flags] Failed to check API flags for " + uuid + ":", err.message);
-        return { recentGamesEnabled: true, winstreakEnabled: true };
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(fn, label) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            const status = err?.response?.status;
+            if (status === 429 && attempt < 2) {
+                const wait = parseInt(err.response?.headers?.["retry-after"] || "5000");
+                console.warn("[api flags] Rate limited on " + label + ", retrying in " + wait + "ms");
+                await sleep(wait);
+                continue;
+            }
+            console.error("[api flags] " + label + " failed: HTTP " + (status || "?") + " - " + err.message);
+            return null;
+        }
     }
+    return null;
+}
+
+async function checkPlayerApiFlags(uuid) {
+    const [games, stats] = await Promise.all([
+        fetchWithRetry(() => getRecentGames(uuid), "recentgames"),
+        fetchWithRetry(() => getStats(uuid), "player stats")
+    ]);
+
+    if (games === null && stats === null) {
+        console.error("[api flags] Both API calls failed for " + uuid + " - cannot check flags");
+        return { recentGamesEnabled: null, winstreakEnabled: null };
+    }
+
+    const resolvedGames = games ?? [];
+    const resolvedStats = stats ?? {};
+
+    const hasPlayedBefore    = (resolvedStats.games_played_bedwars || 0) > 0;
+    const recentGamesEnabled = games === null ? null : !(hasPlayedBefore && resolvedGames.length === 0);
+    const winstreakEnabled   = stats === null ? null :
+        !hasPlayedBefore ||
+        resolvedStats.winstreak !== undefined ||
+        resolvedStats.eight_one_winstreak !== undefined ||
+        resolvedStats.eight_two_winstreak !== undefined ||
+        resolvedStats.four_three_winstreak !== undefined ||
+        resolvedStats.four_four_winstreak !== undefined;
+
+    console.log("[api flags] uuid=" + uuid +
+        " gamesPlayed=" + (resolvedStats.games_played_bedwars || 0) +
+        " recentGamesCount=" + resolvedGames.length +
+        " recentGamesEnabled=" + recentGamesEnabled +
+        " winstreakEnabled=" + winstreakEnabled +
+        " winstreak=" + resolvedStats.winstreak +
+        " eight_one_winstreak=" + resolvedStats.eight_one_winstreak);
+
+    return { recentGamesEnabled, winstreakEnabled };
 }
 
 async function isPlayerNicked(uuid, expectedGameType) {
@@ -172,10 +205,6 @@ function signed(n) {
     return (n >= 0 ? "+" : "") + n.toFixed(3);
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 const POLL_INTERVAL_ACTIVE = 12000;
 const POLL_INTERVAL_IDLE   = 20000;
 const STAGGER_STEP         = 3000;
@@ -232,7 +261,7 @@ async function addPlayer(inputUsername, userId) {
 
     if (existingKey) {
         if (data.players[existingKey].discordUsers.includes(userId)) {
-            return { success: true, canonicalName: existingKey, recentGamesEnabled: true, winstreakEnabled: true, alreadyTracking: true };
+            return { success: true, canonicalName: existingKey, recentGamesEnabled: null, winstreakEnabled: null, alreadyTracking: true };
         }
 
         data.players[existingKey].discordUsers.push(userId);
@@ -436,7 +465,7 @@ function startPollingPlayer(username, delay) {
     playerTimers[username] = setTimeout(() => pollPlayer(username), delay);
 }
 
-client.once("clientReady", async () => {
+client.once("ready", async () => {
     console.log("Logged in as " + client.user.tag);
     await validateHypixelKey();
     loadData();
@@ -565,8 +594,8 @@ client.on("interactionCreate", async interaction => {
         await getOrCreateThread(canonicalName);
 
         const warnings = [];
-        if (!recentGamesEnabled) warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Recent Games API disabled on Hypixel, or they haven't logged in in a long time. The bot won't be able to detect when they start a game unless they enable it again in their Hypixel API settings.");
-        if (!winstreakEnabled)   warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Winstreak API disabled on Hypixel. Winstreak changes will show as **? → ?** unless they enable it again in their Hypixel API settings.");
+        if (recentGamesEnabled === false) warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Recent Games API disabled on Hypixel, or they haven't logged in in a long time. The bot won't be able to detect when they start a game unless they enable it again in their Hypixel API settings.");
+        if (winstreakEnabled === false)   warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Winstreak API disabled on Hypixel. Winstreak changes will show as **? → ?** unless they enable it again in their Hypixel API settings.");
 
         const warningText = warnings.length ? "\n\n" + warnings.join("\n\n") : "";
         return interaction.editReply("Now tracking **" + canonicalName + "**" + warningText);
