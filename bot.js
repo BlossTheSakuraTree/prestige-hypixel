@@ -46,7 +46,6 @@ function saveData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// Returns { uuid, canonicalName } or null
 async function getUUID(username) {
     try {
         const res = await axios.get("https://api.mojang.com/users/profiles/minecraft/" + username);
@@ -66,7 +65,6 @@ async function getStats(uuid) {
     return res.data.player?.stats?.Bedwars || {};
 }
 
-// Validates the Hypixel API key at startup - exits immediately if invalid
 async function validateHypixelKey() {
     try {
         const res = await axios.get("https://api.hypixel.net/key?key=" + HYPIXEL_KEY);
@@ -83,13 +81,10 @@ async function validateHypixelKey() {
             console.error("Generate a new key at: https://developer.hypixel.net/");
             process.exit(1);
         }
-        // Network error etc - don't block startup, polling will surface it
         console.warn("Could not validate Hypixel API key at startup:", err.message);
     }
 }
 
-// Checks both recent games and winstreak API visibility in one call.
-// Winstreak API being off means all *_winstreak fields are absent from the stats object.
 async function checkPlayerApiFlags(uuid) {
     try {
         const [games, stats] = await Promise.all([getRecentGames(uuid), getStats(uuid)]);
@@ -115,10 +110,6 @@ async function checkPlayerApiFlags(uuid) {
     }
 }
 
-// Returns true if the player appears to be nicked.
-// When nicked, Hypixel hides the real UUID from the status API entirely (online: false).
-// expectedGameType: the gameType we just detected them entering (e.g. "BEDWARS") -
-// used as positive confirmation that they're NOT nicked if their UUID is visible in that game.
 async function isPlayerNicked(uuid, expectedGameType) {
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
@@ -131,21 +122,16 @@ async function isPlayerNicked(uuid, expectedGameType) {
 
             const session = res.data.session;
 
-            // Real UUID not showing as online at all - since we know they just entered a game,
-            // this means their real UUID is hidden by Hypixel because they nicked.
             if (!session?.online) {
                 console.log("[nick check] " + uuid + " shows offline while in-game - likely nicked");
                 return true;
             }
 
-            // Positive confirmation: visible and in the right game type -> definitely not nicked
             if (expectedGameType && session.gameType === expectedGameType) {
                 console.log("[nick check] " + uuid + " visible in " + session.gameType + " - not nicked");
                 return false;
             }
 
-            // Online but in an unexpected game type (e.g. LOBBY, LIMBO, or different game).
-            // Their real UUID is visible, so they are not nicked.
             console.log("[nick check] " + uuid + " online in " + (session.gameType || "unknown") + ", expected " + expectedGameType + " - not nicked");
             return false;
 
@@ -195,7 +181,6 @@ const POLL_INTERVAL_IDLE   = 20000;
 const STAGGER_STEP         = 3000;
 const NICK_CHECK_DELAY     = 15000;
 
-// Finds an existing player entry by UUID (case-insensitive lookup helper)
 function findPlayerKeyByUUID(uuid) {
     return Object.keys(data.players).find(k => data.players[k].uuid === uuid) || null;
 }
@@ -243,16 +228,13 @@ async function addPlayer(inputUsername, userId) {
 
     const { uuid, canonicalName } = result;
 
-    // Check if this player is already tracked (matched by UUID, regardless of input casing)
     const existingKey = findPlayerKeyByUUID(uuid);
 
     if (existingKey) {
-        // User is already tracking this player
         if (data.players[existingKey].discordUsers.includes(userId)) {
-            return { success: true, canonicalName: existingKey, recentGamesEnabled: true, alreadyTracking: true };
+            return { success: true, canonicalName: existingKey, recentGamesEnabled: true, winstreakEnabled: true, alreadyTracking: true };
         }
 
-        // Different user tracking an existing player - add them to the tracker and thread
         data.players[existingKey].discordUsers.push(userId);
 
         if (data.threads[existingKey]) {
@@ -263,10 +245,11 @@ async function addPlayer(inputUsername, userId) {
         }
 
         saveData();
-        return { success: true, canonicalName: existingKey, recentGamesEnabled: true, winstreakEnabled: true, alreadyTracking: false };
+
+        const { recentGamesEnabled, winstreakEnabled } = await checkPlayerApiFlags(uuid);
+        return { success: true, canonicalName: existingKey, recentGamesEnabled, winstreakEnabled, alreadyTracking: false };
     }
 
-    // Brand-new player - store under the canonical Mojang username
     const { recentGamesEnabled, winstreakEnabled } = await checkPlayerApiFlags(uuid);
 
     data.players[canonicalName] = {
@@ -285,11 +268,9 @@ async function addPlayer(inputUsername, userId) {
 }
 
 async function removePlayer(inputUsername, userId) {
-    // Resolve to canonical key: exact match first, then UUID lookup via Mojang
     let key = data.players[inputUsername] ? inputUsername : null;
 
     if (!key) {
-        // Try a case-insensitive match against stored keys
         key = Object.keys(data.players).find(
             k => k.toLowerCase() === inputUsername.toLowerCase()
         ) || null;
@@ -412,7 +393,6 @@ async function pollPlayer(username) {
             const capturedGameId = latestGame.date;
             sleep(NICK_CHECK_DELAY).then(async () => {
                 if (!data.players[username]) return;
-                // Skip if the game already ended before the 15s check fires
                 if (data.players[username].currentGame?.id !== capturedGameId) return;
                 const nicked = await isPlayerNicked(player.uuid, latestGame.gameType);
                 if (nicked) {
@@ -434,7 +414,6 @@ async function pollPlayer(username) {
         const status = err?.response?.status;
 
         if (status === 403 || status === 401) {
-            // API key is invalid - no point retrying, stop polling entirely
             console.error("[" + username + "] Fatal: Hypixel API key rejected (HTTP " + status + "). Stopping poll. Generate a new key at: https://developer.hypixel.net/");
             return;
         }
@@ -447,8 +426,6 @@ async function pollPlayer(username) {
         }
 
         console.error("[" + username + "] Poll error:", err.message);
-        playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_IDLE);
-        return;
     }
 
     playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_IDLE);
@@ -492,7 +469,6 @@ client.once("clientReady", async () => {
     const rest = new REST({ version: "10" }).setToken(TOKEN);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
 
-    // Cache the notification channel name once so we don't fetch it on every interaction
     try {
         const notifChannel = await client.channels.fetch(NOTIFICATION_CHANNEL);
         notificationChannelName = notifChannel.name;
@@ -544,10 +520,6 @@ client.on("threadMembersUpdate", (addedMembers, removedMembers, thread) => {
 });
 
 client.on("interactionCreate", async interaction => {
-
-    // Restrict commands to the notification channel only.
-    // Also allow interactions that originate inside one of the private threads
-    // (e.g. button confirmations sent while the user is viewing a thread).
     const isInCorrectChannel = interaction.channelId === NOTIFICATION_CHANNEL;
     const isInChildThread    = interaction.channel?.parentId === NOTIFICATION_CHANNEL;
 
