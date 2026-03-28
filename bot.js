@@ -88,21 +88,20 @@ async function validateHypixelKey() {
     }
 }
 
-// Checks winstreak API visibility.
-// Hypixel returns an identical empty array for recent games whether the API is off
-// or the player just hasn't played recently - so that check is unreliable and omitted.
+// Checks both recent games and winstreak API visibility in one call.
 // Winstreak API being off means all *_winstreak fields are absent from the stats object.
 async function checkPlayerApiFlags(uuid) {
     try {
-        const stats = await getStats(uuid);
-        const hasPlayedBefore = (stats.games_played_bedwars || 0) > 0;
-        const winstreakEnabled = !hasPlayedBefore ||
-                                 stats.winstreak !== undefined ||
-                                 stats.eight_one_winstreak !== undefined ||
-                                 stats.eight_two_winstreak !== undefined ||
-                                 stats.four_three_winstreak !== undefined ||
-                                 stats.four_four_winstreak !== undefined;
-        return { recentGamesEnabled: true, winstreakEnabled };
+        const [games, stats] = await Promise.all([getRecentGames(uuid), getStats(uuid)]);
+        const hasPlayedBefore    = (stats.games_played_bedwars || 0) > 0;
+        const recentGamesEnabled = !(hasPlayedBefore && games.length === 0);
+        const winstreakEnabled   = !hasPlayedBefore ||
+                                   stats.winstreak !== undefined ||
+                                   stats.eight_one_winstreak !== undefined ||
+                                   stats.eight_two_winstreak !== undefined ||
+                                   stats.four_three_winstreak !== undefined ||
+                                   stats.four_four_winstreak !== undefined;
+        return { recentGamesEnabled, winstreakEnabled };
     } catch {
         return { recentGamesEnabled: true, winstreakEnabled: true };
     }
