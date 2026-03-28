@@ -27,7 +27,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-const DATA_FILE = process.env.DATA_PATH || require("path").join(__dirname, "/data/data.json");
+const DATA_FILE = process.env.DATA_PATH || require("path").join(__dirname, "data.json");
 let data = { players: {}, threads: {} };
 
 function loadData() {
@@ -46,6 +46,47 @@ function saveData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+const MIN_REQUEST_GAP = 300;
+let lastRequestTime = 0;
+let rateLimitedUntil = 0;
+let requestQueue = Promise.resolve();
+
+function hypixelRequest(url) {
+    requestQueue = requestQueue.then(async () => {
+        const now = Date.now();
+
+        if (rateLimitedUntil > now) {
+            const wait = rateLimitedUntil - now;
+            console.warn("[queue] Rate limited - waiting " + (wait / 1000).toFixed(1) + "s before next request");
+            await sleep(wait);
+        }
+
+        const gap = Date.now() - lastRequestTime;
+        if (gap < MIN_REQUEST_GAP) {
+            await sleep(MIN_REQUEST_GAP - gap);
+        }
+
+        lastRequestTime = Date.now();
+    });
+
+    return requestQueue.then(async () => {
+        try {
+            return await axios.get(url);
+        } catch (err) {
+            if (err?.response?.status === 429) {
+                const retryAfter = parseInt(err.response.headers?.["retry-after"] || "10000");
+                rateLimitedUntil = Date.now() + retryAfter;
+                console.warn("[queue] 429 received - blocking all requests for " + (retryAfter / 1000).toFixed(1) + "s");
+            }
+            throw err;
+        }
+    });
+}
+
 async function getUUID(username) {
     try {
         const res = await axios.get("https://api.mojang.com/users/profiles/minecraft/" + username);
@@ -56,18 +97,18 @@ async function getUUID(username) {
 }
 
 async function getRecentGames(uuid) {
-    const res = await axios.get("https://api.hypixel.net/recentgames?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
+    const res = await hypixelRequest("https://api.hypixel.net/recentgames?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
     return res.data.games || [];
 }
 
 async function getStats(uuid) {
-    const res = await axios.get("https://api.hypixel.net/player?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
+    const res = await hypixelRequest("https://api.hypixel.net/player?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
     return res.data.player?.stats?.Bedwars || {};
 }
 
 async function validateHypixelKey() {
     try {
-        const res = await axios.get("https://api.hypixel.net/key?key=" + HYPIXEL_KEY);
+        const res = await hypixelRequest("https://api.hypixel.net/key?key=" + HYPIXEL_KEY);
         if (!res.data?.success) {
             console.error("Hypixel API key is invalid or has been revoked.");
             console.error("Generate a new key at: https://developer.hypixel.net/");
@@ -85,100 +126,63 @@ async function validateHypixelKey() {
     }
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function fetchWithRetry(fn, label) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-            return await fn();
-        } catch (err) {
-            const status = err?.response?.status;
-            if (status === 429 && attempt < 2) {
-                const wait = parseInt(err.response?.headers?.["retry-after"] || "5000");
-                console.warn("[api flags] Rate limited on " + label + ", retrying in " + wait + "ms");
-                await sleep(wait);
-                continue;
-            }
-            console.error("[api flags] " + label + " failed: HTTP " + (status || "?") + " - " + err.message);
-            return null;
-        }
-    }
-    return null;
-}
-
 async function checkPlayerApiFlags(uuid) {
-    const [games, stats] = await Promise.all([
-        fetchWithRetry(() => getRecentGames(uuid), "recentgames"),
-        fetchWithRetry(() => getStats(uuid), "player stats")
-    ]);
+    try {
+        const games = await getRecentGames(uuid);
+        const stats = await getStats(uuid);
 
-    if (games === null && stats === null) {
-        console.error("[api flags] Both API calls failed for " + uuid + " - cannot check flags");
+        const hasPlayedBefore    = (stats.games_played_bedwars || 0) > 0;
+        const recentGamesEnabled = !(hasPlayedBefore && games.length === 0);
+        const winstreakEnabled   =
+            !hasPlayedBefore ||
+            stats.winstreak !== undefined ||
+            stats.eight_one_winstreak !== undefined ||
+            stats.eight_two_winstreak !== undefined ||
+            stats.four_three_winstreak !== undefined ||
+            stats.four_four_winstreak !== undefined;
+
+        console.log("[api flags] uuid=" + uuid +
+            " gamesPlayed=" + (stats.games_played_bedwars || 0) +
+            " recentGamesCount=" + games.length +
+            " recentGamesEnabled=" + recentGamesEnabled +
+            " winstreakEnabled=" + winstreakEnabled +
+            " winstreak=" + stats.winstreak +
+            " eight_one_winstreak=" + stats.eight_one_winstreak);
+
+        return { recentGamesEnabled, winstreakEnabled };
+    } catch (err) {
+        console.error("[api flags] Failed to check API flags for " + uuid + ":", err.message);
         return { recentGamesEnabled: null, winstreakEnabled: null };
     }
-
-    const resolvedGames = games ?? [];
-    const resolvedStats = stats ?? {};
-
-    const hasPlayedBefore    = (resolvedStats.games_played_bedwars || 0) > 0;
-    const recentGamesEnabled = games === null ? null : !(hasPlayedBefore && resolvedGames.length === 0);
-    const winstreakEnabled   = stats === null ? null :
-        !hasPlayedBefore ||
-        resolvedStats.winstreak !== undefined ||
-        resolvedStats.eight_one_winstreak !== undefined ||
-        resolvedStats.eight_two_winstreak !== undefined ||
-        resolvedStats.four_three_winstreak !== undefined ||
-        resolvedStats.four_four_winstreak !== undefined;
-
-    console.log("[api flags] uuid=" + uuid +
-        " gamesPlayed=" + (resolvedStats.games_played_bedwars || 0) +
-        " recentGamesCount=" + resolvedGames.length +
-        " recentGamesEnabled=" + recentGamesEnabled +
-        " winstreakEnabled=" + winstreakEnabled +
-        " winstreak=" + resolvedStats.winstreak +
-        " eight_one_winstreak=" + resolvedStats.eight_one_winstreak);
-
-    return { recentGamesEnabled, winstreakEnabled };
 }
 
 async function isPlayerNicked(uuid, expectedGameType) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-            const res = await axios.get("https://api.hypixel.net/status?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
+    try {
+        const res = await hypixelRequest("https://api.hypixel.net/status?key=" + HYPIXEL_KEY + "&uuid=" + uuid);
 
-            if (!res.data?.success) {
-                console.warn("[nick check] API returned success:false, assuming not nicked");
-                return false;
-            }
-
-            const session = res.data.session;
-
-            if (!session?.online) {
-                console.log("[nick check] " + uuid + " shows offline while in-game - likely nicked");
-                return true;
-            }
-
-            if (expectedGameType && session.gameType === expectedGameType) {
-                console.log("[nick check] " + uuid + " visible in " + session.gameType + " - not nicked");
-                return false;
-            }
-
-            console.log("[nick check] " + uuid + " online in " + (session.gameType || "unknown") + ", expected " + expectedGameType + " - not nicked");
-            return false;
-
-        } catch (err) {
-            if (err?.response?.status === 429 && attempt === 0) {
-                const wait = parseInt(err.response.headers["retry-after"] || "10000");
-                await sleep(wait);
-                continue;
-            }
-            console.warn("[nick check] status API failed, assuming not nicked:", err.message);
+        if (!res.data?.success) {
+            console.warn("[nick check] API returned success:false, assuming not nicked");
             return false;
         }
+
+        const session = res.data.session;
+
+        if (!session?.online) {
+            console.log("[nick check] " + uuid + " shows offline while in-game - likely nicked");
+            return true;
+        }
+
+        if (expectedGameType && session.gameType === expectedGameType) {
+            console.log("[nick check] " + uuid + " visible in " + session.gameType + " - not nicked");
+            return false;
+        }
+
+        console.log("[nick check] " + uuid + " online in " + (session.gameType || "unknown") + ", expected " + expectedGameType + " - not nicked");
+        return false;
+    } catch (err) {
+        console.warn("[nick check] status API failed, assuming not nicked:", err.message);
+        return false;
     }
-    return false;
 }
 
 const MODE_INFO = {
@@ -256,7 +260,6 @@ async function addPlayer(inputUsername, userId) {
     if (!result) return { success: false, canonicalName: null };
 
     const { uuid, canonicalName } = result;
-
     const existingKey = findPlayerKeyByUUID(uuid);
 
     if (existingKey) {
@@ -443,14 +446,7 @@ async function pollPlayer(username) {
         const status = err?.response?.status;
 
         if (status === 403 || status === 401) {
-            console.error("[" + username + "] Fatal: Hypixel API key rejected (HTTP " + status + "). Stopping poll. Generate a new key at: https://developer.hypixel.net/");
-            return;
-        }
-
-        if (status === 429) {
-            const retryAfter = parseInt(err.response.headers["retry-after"] || "10000");
-            console.warn("[" + username + "] Rate limited - retrying in " + (retryAfter / 1000) + "s");
-            playerTimers[username] = setTimeout(() => pollPlayer(username), retryAfter);
+            console.error("[" + username + "] Fatal: Hypixel API key rejected (HTTP " + status + "). Stopping poll.");
             return;
         }
 
@@ -465,7 +461,7 @@ function startPollingPlayer(username, delay) {
     playerTimers[username] = setTimeout(() => pollPlayer(username), delay);
 }
 
-client.once("ready", async () => {
+client.once("clientReady", async () => {
     console.log("Logged in as " + client.user.tag);
     await validateHypixelKey();
     loadData();
