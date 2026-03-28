@@ -66,17 +66,44 @@ async function getStats(uuid) {
     return res.data.player?.stats?.Bedwars || {};
 }
 
-// Returns true if recent games API appears to be enabled (or player has no stats yet)
-async function hasRecentGamesEnabled(uuid) {
+// Validates the Hypixel API key at startup - exits immediately if invalid
+async function validateHypixelKey() {
+    try {
+        const res = await axios.get("https://api.hypixel.net/key?key=" + HYPIXEL_KEY);
+        if (!res.data?.success) {
+            console.error("Hypixel API key is invalid or has been revoked.");
+            console.error("Generate a new key at: https://developer.hypixel.net/");
+            process.exit(1);
+        }
+        console.log("Hypixel API key validated.");
+    } catch (err) {
+        const status = err?.response?.status;
+        if (status === 403 || status === 401) {
+            console.error("Hypixel API key rejected (HTTP " + status + ").");
+            console.error("Generate a new key at: https://developer.hypixel.net/");
+            process.exit(1);
+        }
+        // Network error etc - don't block startup, polling will surface it
+        console.warn("Could not validate Hypixel API key at startup:", err.message);
+    }
+}
+
+// Checks both recent games and winstreak API visibility in one call.
+// Winstreak API being off means all *_winstreak fields are absent from the stats object.
+async function checkPlayerApiFlags(uuid) {
     try {
         const [games, stats] = await Promise.all([getRecentGames(uuid), getStats(uuid)]);
-        const hasPlayedBefore = (stats.games_played_bedwars || 0) > 0;
-        // If they've played Bedwars but recent games is empty, API is almost certainly off
-        if (hasPlayedBefore && games.length === 0) return false;
-        return true;
+        const hasPlayedBefore  = (stats.games_played_bedwars || 0) > 0;
+        const recentGamesEnabled = !(hasPlayedBefore && games.length === 0);
+        // If the player has played but no winstreak field exists at all, API is off
+        const winstreakEnabled   = !hasPlayedBefore || stats.winstreak !== undefined ||
+                                   stats.eight_one_winstreak !== undefined ||
+                                   stats.eight_two_winstreak !== undefined ||
+                                   stats.four_three_winstreak !== undefined ||
+                                   stats.four_four_winstreak !== undefined;
+        return { recentGamesEnabled, winstreakEnabled };
     } catch {
-        // If we can't tell, don't block the add - just don't warn
-        return true;
+        return { recentGamesEnabled: true, winstreakEnabled: true };
     }
 }
 
@@ -232,7 +259,7 @@ async function addPlayer(inputUsername, userId) {
     }
 
     // Brand-new player - store under the canonical Mojang username
-    const recentGamesEnabled = await hasRecentGamesEnabled(uuid);
+    const { recentGamesEnabled, winstreakEnabled } = await checkPlayerApiFlags(uuid);
 
     data.players[canonicalName] = {
         uuid,
@@ -246,7 +273,7 @@ async function addPlayer(inputUsername, userId) {
     startPollingPlayer(canonicalName, 0);
 
     saveData();
-    return { success: true, canonicalName, recentGamesEnabled };
+    return { success: true, canonicalName, recentGamesEnabled, winstreakEnabled };
 }
 
 async function removePlayer(inputUsername, userId) {
@@ -307,13 +334,19 @@ async function pollPlayer(username) {
                 const wlrBefore  = wlr(prev);
                 const wlrAfter   = wlr(cur);
 
-                const streakBefore = prev[streakKey] ?? prev.winstreak ?? 0;
-                const streakAfter  = cur[streakKey]  ?? cur.winstreak  ?? 0;
-                const streakDiff   = streakAfter - streakBefore;
+                const streakBefore = prev[streakKey] ?? prev.winstreak;
+                const streakAfter  = cur[streakKey]  ?? cur.winstreak;
+                const winstreakApiOff = streakBefore === undefined && streakAfter === undefined;
 
-                const streakLine = streakAfter === 0
-                    ? "Winstreak: reset to 0"
-                    : "Winstreak: " + (streakDiff >= 0 ? "+" : "") + streakDiff + " (now " + streakAfter + ")";
+                let streakLine;
+                if (winstreakApiOff) {
+                    streakLine = "Winstreak: ? \u2192 ?";
+                } else if (streakAfter === 0) {
+                    streakLine = "Winstreak: reset to 0";
+                } else {
+                    const streakDiff = (streakAfter ?? 0) - (streakBefore ?? 0);
+                    streakLine = "Winstreak: " + (streakDiff >= 0 ? "+" : "") + streakDiff + " (now " + streakAfter + ")";
+                }
 
                 const outcome = gotWin ? "won" : "was eliminated from";
 
@@ -390,18 +423,23 @@ async function pollPlayer(username) {
         }
 
     } catch (err) {
-        const isRateLimit = err?.response?.status === 429;
-        const retryAfter  = isRateLimit
-            ? parseInt(err.response.headers["retry-after"] || "10000")
-            : POLL_INTERVAL_IDLE;
+        const status = err?.response?.status;
 
-        if (isRateLimit) {
-            console.warn("[" + username + "] Rate limited - retrying in " + (retryAfter / 1000) + "s");
-        } else {
-            console.error("[" + username + "] Poll error:", err.message);
+        if (status === 403 || status === 401) {
+            // API key is invalid - no point retrying, stop polling entirely
+            console.error("[" + username + "] Fatal: Hypixel API key rejected (HTTP " + status + "). Stopping poll. Generate a new key at: https://developer.hypixel.net/");
+            return;
         }
 
-        playerTimers[username] = setTimeout(() => pollPlayer(username), retryAfter);
+        if (status === 429) {
+            const retryAfter = parseInt(err.response.headers["retry-after"] || "10000");
+            console.warn("[" + username + "] Rate limited - retrying in " + (retryAfter / 1000) + "s");
+            playerTimers[username] = setTimeout(() => pollPlayer(username), retryAfter);
+            return;
+        }
+
+        console.error("[" + username + "] Poll error:", err.message);
+        playerTimers[username] = setTimeout(() => pollPlayer(username), POLL_INTERVAL_IDLE);
         return;
     }
 
@@ -415,6 +453,7 @@ function startPollingPlayer(username, delay) {
 
 client.once("clientReady", async () => {
     console.log("Logged in as " + client.user.tag);
+    await validateHypixelKey();
     loadData();
 
     Object.keys(data.players).forEach((username, i) => {
@@ -539,17 +578,18 @@ client.on("interactionCreate", async interaction => {
         const inputUsername = interaction.options.getString("username");
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const { success, canonicalName, recentGamesEnabled, alreadyTracking } = await addPlayer(inputUsername, userId);
+        const { success, canonicalName, recentGamesEnabled, winstreakEnabled, alreadyTracking } = await addPlayer(inputUsername, userId);
         if (!success) return interaction.editReply("Could not find player **" + inputUsername + "**");
         if (alreadyTracking) return interaction.editReply("You are already tracking **" + canonicalName + "**!");
 
         await getOrCreateThread(canonicalName);
 
-        const warning = recentGamesEnabled
-            ? ""
-            : "\n\n⚠️ **Warning:** **" + canonicalName + "** has their Recent Games API disabled on Hypixel. The bot won't be able to detect when they start a game until they turn it back on (`/api` in-game).";
+        const warnings = [];
+        if (!recentGamesEnabled) warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Recent Games API disabled on Hypixel. The bot won\'t be able to detect when they start a game until they turn it back on (`/api` in-game).");
+        if (!winstreakEnabled)   warnings.push("⚠️ **Warning:** **" + canonicalName + "** has their Winstreak API disabled on Hypixel. Winstreak changes will show as **? → ?** until they turn it back on (`/api` in-game).");
 
-        return interaction.editReply("Now tracking **" + canonicalName + "**" + warning);
+        const warningText = warnings.length ? "\n\n" + warnings.join("\n\n") : "";
+        return interaction.editReply("Now tracking **" + canonicalName + "**" + warningText);
     }
 
     if (interaction.commandName === "removeplayer") {
