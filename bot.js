@@ -101,8 +101,16 @@ async function checkPlayerApiFlags(uuid) {
                                    stats.eight_two_winstreak !== undefined ||
                                    stats.four_three_winstreak !== undefined ||
                                    stats.four_four_winstreak !== undefined;
+        console.log("[api flags] uuid=" + uuid +
+            " gamesPlayed=" + (stats.games_played_bedwars || 0) +
+            " recentGamesCount=" + games.length +
+            " recentGamesEnabled=" + recentGamesEnabled +
+            " winstreakEnabled=" + winstreakEnabled +
+            " winstreak=" + stats.winstreak +
+            " eight_one_winstreak=" + stats.eight_one_winstreak);
         return { recentGamesEnabled, winstreakEnabled };
-    } catch {
+    } catch (err) {
+        console.error("[api flags] Failed to check API flags for " + uuid + ":", err.message);
         return { recentGamesEnabled: true, winstreakEnabled: true };
     }
 }
@@ -255,7 +263,7 @@ async function addPlayer(inputUsername, userId) {
         }
 
         saveData();
-        return { success: true, canonicalName: existingKey, recentGamesEnabled: true, alreadyTracking: false };
+        return { success: true, canonicalName: existingKey, recentGamesEnabled: true, winstreakEnabled: true, alreadyTracking: false };
     }
 
     // Brand-new player - store under the canonical Mojang username
